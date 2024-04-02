@@ -5,13 +5,20 @@ import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
+from typing import Generator, Optional, Union, Dict, List, Any
+import json
+
 import fastapi
 import uvicorn
-from fastapi import Request
+from http import HTTPStatus
+from fastapi import Request, Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.security.http import HTTPAuthorizationCredentials, HTTPBearer
+
 from prometheus_client import make_asgi_app
+from pydantic_settings import BaseSettings
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -53,6 +60,38 @@ def parse_args():
     return parser.parse_args()
 
 
+# Ported from FastChat
+class AppSettings(BaseSettings):
+    # The address of the model controller.
+    api_keys: Optional[List[str]] = None
+
+app_settings = AppSettings()
+get_bearer_token = HTTPBearer(auto_error=False)
+
+# Ported from fastchat
+async def check_api_key(
+    auth: Optional[HTTPAuthorizationCredentials] = Depends(get_bearer_token),
+) -> str:
+    if app_settings.api_keys:
+        if auth is not None and (token := auth.credentials) in app_settings.api_keys:
+            return token
+
+        raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": "",
+                        "type": "invalid_request_error",
+                        "param": None,
+                        "code": "invalid_api_key",
+                    }
+                },
+            )
+    else:
+        # api_keys not set; allow all
+        logger.debug(f"..... credential not triggered. allow all requests")
+        return None
+
 # Add prometheus asgi middleware to route /metrics requests
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
@@ -71,7 +110,7 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(check_api_key)])
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
     return JSONResponse(content=models.model_dump())
@@ -83,7 +122,7 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(check_api_key)])
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
@@ -98,7 +137,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return JSONResponse(content=generator.model_dump())
 
 
-@app.post("/v1/completions")
+@app.post("/v1/completions", dependencies=[Depends(check_api_key)])
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
@@ -123,16 +162,23 @@ if __name__ == "__main__":
         allow_headers=args.allowed_headers,
     )
 
-    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+    if token := os.environ.get("VLLM_API_KEY"):
+        app_settings.api_keys = set([token])
+    elif args.api_key is not None and not os.path.exists(args.api_key):
+        app_settings.api_keys = set([args.api_key])
+    elif os.path.exists(args.api_key):
+        app_settings.api_keys = set(json.load(open(args.api_key, "r"))["api_keys"])
+    else:
+        app_settings.api_keys = None
 
-        @app.middleware("http")
-        async def authentication(request: Request, call_next):
-            if not request.url.path.startswith("/v1"):
-                return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
-                return JSONResponse(content={"error": "Unauthorized"},
-                                    status_code=401)
-            return await call_next(request)
+        # @app.middleware("http")
+        # async def authentication(request: Request, call_next):
+        #     if not request.url.path.startswith("/v1"):
+        #         return await call_next(request)
+        #     if request.headers.get("Authorization") != "Bearer " + token:
+        #         return JSONResponse(content={"error": "Unauthorized"},
+        #                             status_code=401)
+        #     return await call_next(request)
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)

@@ -13,6 +13,7 @@ xformers == 0.0.23.post1  # Required for CUDA 12.1.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
+pydantic-settings
 prometheus_client >= 0.18.0
 pynvml == 11.5.0
 triton >= 2.1.0

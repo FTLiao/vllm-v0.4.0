@@ -52,7 +52,8 @@ def make_arg_parser():
                         type=str,
                         default=None,
                         help="If provided, the server will require this key "
-                        "to be presented in the header.")
+                        "to be presented in the header. "
+                        "If provided as a found json with \{'api_keys': List[str]\} schema, the api_keys will be loaded.")
     parser.add_argument("--served-model-name",
                         type=str,
                         default=None,
